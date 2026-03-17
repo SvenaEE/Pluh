@@ -12,33 +12,32 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(helmet({
-    contentSecurityPolicy: false,
-}));
-app.use(cors());
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Session configuration
+// Session configuration (use memory store for Vercel)
 app.use(session({
-    secret: 'coinflip-jack-secret-key-2024',
+    secret: process.env.SESSION_SECRET || 'coinflip-jack-secret-2024',
     resave: false,
     saveUninitialized: false,
     cookie: {
-        secure: false, // set to true if using HTTPS
-        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+        secure: false,
+        maxAge: 30 * 24 * 60 * 60 * 1000
     }
 }));
 
 // Rate limiting
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100 // limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 100
 });
 app.use('/api/', limiter);
 
-// Database setup
-const db = new sqlite3.Database('./database.db');
+// Use /tmp for database on Vercel (writable directory)
+const dbPath = process.env.VERCEL ? '/tmp/database.db' : './database.db';
+const db = new sqlite3.Database(dbPath);
 
 // Create tables
 db.serialize(() => {
@@ -59,25 +58,48 @@ db.serialize(() => {
         FOREIGN KEY (user_id) REFERENCES users (id)
     )`);
 
-    // Create index for faster leaderboard queries
     db.run(`CREATE INDEX IF NOT EXISTS idx_leaderboard_balance ON leaderboard(balance DESC)`);
 });
 
-// API Routes
-
-// Check if username exists
-app.post('/api/check-username', (req, res) => {
-    const { username } = req.body;
-    
-    db.get('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error' });
-        }
-        res.json({ exists: !!row });
+// Helper functions
+function dbAll(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.all(sql, params, (err, rows) => {
+            if (err) reject(err);
+            else resolve(rows);
+        });
     });
+}
+
+function dbGet(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+        });
+    });
+}
+
+function dbRun(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.run(sql, params, function(err) {
+            if (err) reject(err);
+            else resolve(this);
+        });
+    });
+}
+
+// API Routes
+app.post('/api/check-username', async (req, res) => {
+    const { username } = req.body;
+    try {
+        const row = await dbGet('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username]);
+        res.json({ exists: !!row });
+    } catch (err) {
+        res.status(500).json({ error: 'Database error' });
+    }
 });
 
-// Register new user
 app.post('/api/register', async (req, res) => {
     const { username, password } = req.body;
     
@@ -94,41 +116,20 @@ app.post('/api/register', async (req, res) => {
     }
     
     try {
-        // Check if username exists
-        const exists = await new Promise((resolve, reject) => {
-            db.get('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
-                if (err) reject(err);
-                resolve(!!row);
-            });
-        });
-        
+        const exists = await dbGet('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username]);
         if (exists) {
             return res.status(400).json({ error: 'Username already taken' });
         }
         
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
         const userId = uuidv4();
         
-        // Create user
-        await new Promise((resolve, reject) => {
-            db.run('INSERT INTO users (id, username, password, balance) VALUES (?, ?, ?, 500)',
-                [userId, username, hashedPassword], (err) => {
-                    if (err) reject(err);
-                    resolve();
-                });
-        });
+        await dbRun('INSERT INTO users (id, username, password, balance) VALUES (?, ?, ?, 500)',
+            [userId, username, hashedPassword]);
         
-        // Add to leaderboard
-        await new Promise((resolve, reject) => {
-            db.run('INSERT INTO leaderboard (user_id, username, balance) VALUES (?, ?, 500)',
-                [userId, username], (err) => {
-                    if (err) reject(err);
-                    resolve();
-                });
-        });
+        await dbRun('INSERT INTO leaderboard (user_id, username, balance) VALUES (?, ?, 500)',
+            [userId, username]);
         
-        // Set session
         req.session.userId = userId;
         req.session.username = username;
         
@@ -147,17 +148,11 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Login user
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     
     try {
-        const user = await new Promise((resolve, reject) => {
-            db.get('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
-                if (err) reject(err);
-                resolve(row);
-            });
-        });
+        const user = await dbGet('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [username]);
         
         if (!user) {
             return res.status(401).json({ error: 'Invalid username or password' });
@@ -168,7 +163,6 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid username or password' });
         }
         
-        // Update session
         req.session.userId = user.id;
         req.session.username = user.username;
         
@@ -187,27 +181,24 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Logout user
 app.post('/api/logout', (req, res) => {
     req.session.destroy();
     res.json({ success: true });
 });
 
-// Get current user
-app.get('/api/current-user', (req, res) => {
+app.get('/api/current-user', async (req, res) => {
     if (!req.session.userId) {
         return res.json({ user: null });
     }
     
-    db.get('SELECT id, username, balance FROM users WHERE id = ?', [req.session.userId], (err, user) => {
-        if (err || !user) {
-            return res.json({ user: null });
-        }
-        res.json({ user });
-    });
+    try {
+        const user = await dbGet('SELECT id, username, balance FROM users WHERE id = ?', [req.session.userId]);
+        res.json({ user: user || null });
+    } catch (err) {
+        res.json({ user: null });
+    }
 });
 
-// Update balance
 app.post('/api/update-balance', async (req, res) => {
     if (!req.session.userId) {
         return res.status(401).json({ error: 'Not authenticated' });
@@ -220,27 +211,15 @@ app.post('/api/update-balance', async (req, res) => {
     }
     
     try {
-        // Update user balance
-        await new Promise((resolve, reject) => {
-            db.run('UPDATE users SET balance = ? WHERE id = ?',
-                [balance, req.session.userId], (err) => {
-                    if (err) reject(err);
-                    resolve();
-                });
-        });
+        await dbRun('UPDATE users SET balance = ? WHERE id = ?',
+            [balance, req.session.userId]);
         
-        // Update or insert into leaderboard
-        await new Promise((resolve, reject) => {
-            db.run(`INSERT INTO leaderboard (user_id, username, balance) 
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET 
-                    balance = excluded.balance,
-                    updated_at = CURRENT_TIMESTAMP`,
-                [req.session.userId, req.session.username, balance], (err) => {
-                    if (err) reject(err);
-                    resolve();
-                });
-        });
+        await dbRun(`INSERT INTO leaderboard (user_id, username, balance) 
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                balance = excluded.balance,
+                updated_at = CURRENT_TIMESTAMP`,
+            [req.session.userId, req.session.username, balance]);
         
         res.json({ success: true });
         
@@ -250,40 +229,43 @@ app.post('/api/update-balance', async (req, res) => {
     }
 });
 
-// Get leaderboard (top 5)
-app.get('/api/leaderboard', (req, res) => {
-    db.all(`SELECT username, balance FROM leaderboard 
-            ORDER BY balance DESC LIMIT 5`, [], (err, rows) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error' });
-        }
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const rows = await dbAll(`SELECT username, balance FROM leaderboard 
+            ORDER BY balance DESC LIMIT 5`);
         res.json(rows);
-    });
+    } catch (err) {
+        res.status(500).json({ error: 'Database error' });
+    }
 });
 
-// Get user rank
-app.get('/api/user-rank/:userId', (req, res) => {
+app.get('/api/user-rank/:userId', async (req, res) => {
     const { userId } = req.params;
     
-    db.get(`WITH ranked AS (
+    try {
+        const row = await dbGet(`WITH ranked AS (
                 SELECT user_id, username, balance, 
                        ROW_NUMBER() OVER (ORDER BY balance DESC) as rank
                 FROM leaderboard
             )
-            SELECT rank FROM ranked WHERE user_id = ?`, [userId], (err, row) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error' });
-        }
+            SELECT rank FROM ranked WHERE user_id = ?`, [userId]);
         res.json({ rank: row ? row.rank : null });
-    });
+    } catch (err) {
+        res.status(500).json({ error: 'Database error' });
+    }
 });
 
-// Serve HTML for all routes (SPA support)
+// Serve HTML for all routes
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+// Export for Vercel serverless
+module.exports = app;
+
+// Only listen if running directly (not on Vercel)
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
