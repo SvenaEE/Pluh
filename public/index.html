@@ -200,7 +200,7 @@
         }
 
         /* ── OTHER CONTAINERS ── */
-        .reward-container, .cases-container, .slot-container {
+        .reward-container, .cases-container, .slot-container, .leaderboard-page {
             display: none; text-align: center;
             background-color: #1f1f1f; padding: 20px;
             border-radius: 10px; box-shadow: 0 0 10px rgba(255,255,255,0.1);
@@ -442,7 +442,7 @@
             border-color: #2a7a44;
         }
 
-        /* ── LEADERBOARD ── */
+        /* ── LEADERBOARD SIDEBAR ── */
         .leaderboard-container {
             background-color: #1f1f1f;
             border-radius: 10px;
@@ -526,6 +526,78 @@
         .leaderboard-current-user-rank span {
             color: #ffc107;
             font-weight: 600;
+        }
+
+        /* ── LEADERBOARD FULL PAGE ── */
+        .leaderboard-page {
+            max-width: 600px;
+            margin: 20px auto;
+            width: 90%;
+        }
+
+        .leaderboard-page h2 {
+            color: #ffc107;
+            font-size: 28px;
+            margin-bottom: 20px;
+        }
+
+        .leaderboard-full-list {
+            background-color: #1f1f1f;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+
+        .leaderboard-header {
+            display: grid;
+            grid-template-columns: 80px 1fr 120px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            font-weight: 600;
+            color: #ffc107;
+        }
+
+        .leaderboard-row {
+            display: grid;
+            grid-template-columns: 80px 1fr 120px;
+            padding: 12px 15px;
+            background-color: #252525;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent;
+        }
+
+        .leaderboard-row:hover {
+            transform: translateX(5px);
+            background-color: #2a2a2a;
+        }
+
+        .leaderboard-row.top-1 {
+            border-left-color: #ffd700;
+            background: linear-gradient(90deg, #2a2a2a, #252525);
+        }
+
+        .leaderboard-row.top-2 {
+            border-left-color: #c0c0c0;
+        }
+
+        .leaderboard-row.top-3 {
+            border-left-color: #cd7f32;
+        }
+
+        .leaderboard-row.current-user {
+            background-color: #1e3a5f;
+            border: 1px solid #007bff;
+        }
+
+        .leaderboard-empty {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+            font-size: 16px;
         }
 
         /* ── POPUP ── */
@@ -636,6 +708,7 @@
         <button onclick="showDailyReward()" id="btn-reward">Daily Reward</button>
         <button onclick="showMines()" id="btn-mines">Mines</button>
         <button onclick="showCases()" id="btn-cases">Cases</button>
+        <button onclick="showLeaderboard()" id="btn-leaderboard" style="background-color: #ffc107; color: #000;">🏆 NihaoMa</button>
         <select id="lang-select" onchange="setLanguage(this.value)">
             <option value="en">🇬🇧 English</option>
             <option value="sv">🇸🇪 Svenska</option>
@@ -739,11 +812,27 @@
     <div id="cases-result"></div>
 </div>
 
-<!-- LEADERBOARD -->
+<!-- LEADERBOARD SIDEBAR -->
 <div class="leaderboard-container" id="leaderboardContainer">
-    <h3>🏆 Top Players</h3>
+    <h3>🏆 NihaoMa Top 5</h3>
     <div id="leaderboardList"></div>
     <div class="leaderboard-current-user-rank" id="userRank"></div>
+</div>
+
+<!-- LEADERBOARD FULL PAGE -->
+<div class="leaderboard-page" id="leaderboard-page">
+    <h2>🏆 NihaoMa Top Players</h2>
+    <div class="leaderboard-full-list">
+        <div class="leaderboard-header">
+            <div>Rank</div>
+            <div>Player</div>
+            <div style="text-align: right">Money</div>
+        </div>
+        <div id="leaderboard-full-list"></div>
+        <div style="text-align: center; margin-top: 30px;">
+            <button onclick="showMines()" class="mines-bet-btn" style="width: auto; padding: 10px 30px;">Back to Game</button>
+        </div>
+    </div>
 </div>
 
 <!-- POPUP -->
@@ -802,6 +891,7 @@
             updateBalance();
             hideUsernameModal();
             loadLeaderboard();
+            loadFullLeaderboard();
         }
         
         // Load reward status
@@ -816,6 +906,9 @@
         updateGemsDisplay();
         initEmptyGrid();
         applyLanguage();
+        
+        // Show mines by default
+        showMines();
     }
 
     // ── Username Modal ──
@@ -921,6 +1014,7 @@
                     updateBalance();
                     hideUsernameModal();
                     loadLeaderboard();
+                    loadFullLeaderboard();
                     showPopup(`Welcome back, ${username}!`, 2000);
                 } else {
                     alert(data.error || 'Login failed');
@@ -952,6 +1046,7 @@
                     updateBalance();
                     hideUsernameModal();
                     loadLeaderboard();
+                    loadFullLeaderboard();
                     showPopup(`Welcome, ${username}!`, 2000);
                 } else {
                     alert(data.error || 'Registration failed');
@@ -985,6 +1080,11 @@
             const leaderboardList = document.getElementById('leaderboardList');
             leaderboardList.innerHTML = '';
             
+            if (!leaderboard || leaderboard.length === 0) {
+                leaderboardList.innerHTML = '<div style="text-align: center; padding: 20px; color: #888;">No players yet</div>';
+                return;
+            }
+            
             leaderboard.forEach((entry, index) => {
                 const rank = index + 1;
                 const item = document.createElement('div');
@@ -992,8 +1092,8 @@
                 
                 item.innerHTML = `
                     <div class="leaderboard-rank">#${rank}</div>
-                    <div class="leaderboard-name">${entry.username}</div>
-                    <div class="leaderboard-balance">${entry.balance} 💰</div>
+                    <div class="leaderboard-name">${escapeHtml(entry.username)}</div>
+                    <div class="leaderboard-balance">${entry.balance.toLocaleString()} 💰</div>
                 `;
                 
                 leaderboardList.appendChild(item);
@@ -1004,13 +1104,48 @@
                 const rankData = await rankResponse.json();
                 
                 if (rankData.rank) {
-                    document.getElementById('userRank').innerHTML = `Your rank: <span>#${rankData.rank}</span> | Balance: <span>${currentUser.balance}</span> 💰`;
+                    document.getElementById('userRank').innerHTML = `Your rank: <span>#${rankData.rank}</span> | Balance: <span>${currentUser.balance.toLocaleString()}</span> 💰`;
                 } else {
-                    document.getElementById('userRank').innerHTML = `Balance: <span>${currentUser.balance}</span> 💰`;
+                    document.getElementById('userRank').innerHTML = `Balance: <span>${currentUser.balance.toLocaleString()}</span> 💰`;
                 }
             }
         } catch (error) {
             console.error('Error loading leaderboard:', error);
+        }
+    }
+
+    async function loadFullLeaderboard() {
+        try {
+            const response = await fetch('/api/leaderboard/all');
+            const leaderboard = await response.json();
+            
+            const listEl = document.getElementById('leaderboard-full-list');
+            
+            if (!leaderboard || leaderboard.length === 0) {
+                listEl.innerHTML = '<div class="leaderboard-empty">No players yet. Be the first!</div>';
+                return;
+            }
+            
+            let html = '';
+            
+            leaderboard.forEach((entry, index) => {
+                const rank = index + 1;
+                const isCurrentUser = currentUser && entry.username === currentUser.username;
+                
+                html += `
+                    <div class="leaderboard-row top-${rank} ${isCurrentUser ? 'current-user' : ''}">
+                        <div class="leaderboard-rank">#${rank}</div>
+                        <div class="leaderboard-name">${escapeHtml(entry.username)}</div>
+                        <div class="leaderboard-balance">${entry.balance.toLocaleString()} 💰</div>
+                    </div>
+                `;
+            });
+            
+            listEl.innerHTML = html;
+        } catch (error) {
+            console.error('Error loading full leaderboard:', error);
+            document.getElementById('leaderboard-full-list').innerHTML = 
+                '<div class="leaderboard-empty">Error loading leaderboard</div>';
         }
     }
 
@@ -1029,7 +1164,8 @@
             if (data.success) {
                 currentUser.balance = newBalance;
                 balance = newBalance;
-                loadLeaderboard(); // Refresh leaderboard
+                loadLeaderboard();
+                loadFullLeaderboard();
                 return true;
             }
             return false;
@@ -1041,7 +1177,6 @@
 
     // ── Modified balance functions ──
     function saveBalance() {
-        // Save locally and to server
         localStorage.setItem('cj_balance', balance);
         if (currentUser) {
             updateServerBalance(balance);
@@ -1053,18 +1188,36 @@
         document.getElementById('reward-container').style.display = 'block';
         document.getElementById('mines-container').style.display = 'none';
         document.getElementById('cases-container').style.display = 'none';
+        document.getElementById('leaderboard-page').style.display = 'none';
     }
     
     function showMines() {
         document.getElementById('reward-container').style.display = 'none';
         document.getElementById('mines-container').style.display = 'block';
         document.getElementById('cases-container').style.display = 'none';
+        document.getElementById('leaderboard-page').style.display = 'none';
     }
     
     function showCases() {
         document.getElementById('reward-container').style.display = 'none';
         document.getElementById('mines-container').style.display = 'none';
         document.getElementById('cases-container').style.display = 'block';
+        document.getElementById('leaderboard-page').style.display = 'none';
+    }
+
+    function showLeaderboard() {
+        document.getElementById('reward-container').style.display = 'none';
+        document.getElementById('mines-container').style.display = 'none';
+        document.getElementById('cases-container').style.display = 'none';
+        document.getElementById('leaderboard-page').style.display = 'block';
+        loadFullLeaderboard();
+    }
+
+    // ── Helper function to escape HTML ──
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     // ── Reward ──
@@ -1299,7 +1452,6 @@
         if (betVal > balance) { alert('Not enough money!'); return; }
         autobetRemaining = autobetInfinite ? Infinity : count;
         autobetRunning = true;
-        autoStartBalance = balance;
         document.getElementById('autobet-btn').textContent = translations[currentLang].stopAutobet;
         document.getElementById('autobet-btn').classList.add('red');
         runAutoRound();
@@ -1351,10 +1503,8 @@
         }
 
         if (hitMine) {
-            // Lost — balance already deducted, nothing added
             showPopup('💥 Hit a mine!', 800);
         } else {
-            // Won — cash out winnings
             const winnings = betAmountMines * mult;
             balance += winnings;
             showPopup(`+${Math.round((mult - 1) * 100)}% Cashout 💰`, 800);
