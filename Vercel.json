@@ -1,0 +1,289 @@
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const session = require('express-session');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(helmet({
+    contentSecurityPolicy: false,
+}));
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Session configuration
+app.use(session({
+    secret: 'coinflip-jack-secret-key-2024',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: false, // set to true if using HTTPS
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    }
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', limiter);
+
+// Database setup
+const db = new sqlite3.Database('./database.db');
+
+// Create tables
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        balance INTEGER DEFAULT 500,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS leaderboard (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        balance INTEGER NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )`);
+
+    // Create index for faster leaderboard queries
+    db.run(`CREATE INDEX IF NOT EXISTS idx_leaderboard_balance ON leaderboard(balance DESC)`);
+});
+
+// API Routes
+
+// Check if username exists
+app.post('/api/check-username', (req, res) => {
+    const { username } = req.body;
+    
+    db.get('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
+        if (err) {
+            return res.status(500).json({ error: 'Database error' });
+        }
+        res.json({ exists: !!row });
+    });
+});
+
+// Register new user
+app.post('/api/register', async (req, res) => {
+    const { username, password } = req.body;
+    
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+    }
+    
+    if (username.length < 3 || username.length > 20) {
+        return res.status(400).json({ error: 'Username must be 3-20 characters' });
+    }
+    
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        return res.status(400).json({ error: 'Username can only contain letters, numbers, and underscores' });
+    }
+    
+    try {
+        // Check if username exists
+        const exists = await new Promise((resolve, reject) => {
+            db.get('SELECT username FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
+                if (err) reject(err);
+                resolve(!!row);
+            });
+        });
+        
+        if (exists) {
+            return res.status(400).json({ error: 'Username already taken' });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const userId = uuidv4();
+        
+        // Create user
+        await new Promise((resolve, reject) => {
+            db.run('INSERT INTO users (id, username, password, balance) VALUES (?, ?, ?, 500)',
+                [userId, username, hashedPassword], (err) => {
+                    if (err) reject(err);
+                    resolve();
+                });
+        });
+        
+        // Add to leaderboard
+        await new Promise((resolve, reject) => {
+            db.run('INSERT INTO leaderboard (user_id, username, balance) VALUES (?, ?, 500)',
+                [userId, username], (err) => {
+                    if (err) reject(err);
+                    resolve();
+                });
+        });
+        
+        // Set session
+        req.session.userId = userId;
+        req.session.username = username;
+        
+        res.json({ 
+            success: true, 
+            user: { 
+                id: userId, 
+                username, 
+                balance: 500 
+            } 
+        });
+        
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Login user
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    
+    try {
+        const user = await new Promise((resolve, reject) => {
+            db.get('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [username], (err, row) => {
+                if (err) reject(err);
+                resolve(row);
+            });
+        });
+        
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        
+        // Update session
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        
+        res.json({ 
+            success: true, 
+            user: { 
+                id: user.id, 
+                username: user.username, 
+                balance: user.balance 
+            } 
+        });
+        
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Logout user
+app.post('/api/logout', (req, res) => {
+    req.session.destroy();
+    res.json({ success: true });
+});
+
+// Get current user
+app.get('/api/current-user', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ user: null });
+    }
+    
+    db.get('SELECT id, username, balance FROM users WHERE id = ?', [req.session.userId], (err, user) => {
+        if (err || !user) {
+            return res.json({ user: null });
+        }
+        res.json({ user });
+    });
+});
+
+// Update balance
+app.post('/api/update-balance', async (req, res) => {
+    if (!req.session.userId) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    const { balance } = req.body;
+    
+    if (typeof balance !== 'number' || balance < 0) {
+        return res.status(400).json({ error: 'Invalid balance' });
+    }
+    
+    try {
+        // Update user balance
+        await new Promise((resolve, reject) => {
+            db.run('UPDATE users SET balance = ? WHERE id = ?',
+                [balance, req.session.userId], (err) => {
+                    if (err) reject(err);
+                    resolve();
+                });
+        });
+        
+        // Update or insert into leaderboard
+        await new Promise((resolve, reject) => {
+            db.run(`INSERT INTO leaderboard (user_id, username, balance) 
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET 
+                    balance = excluded.balance,
+                    updated_at = CURRENT_TIMESTAMP`,
+                [req.session.userId, req.session.username, balance], (err) => {
+                    if (err) reject(err);
+                    resolve();
+                });
+        });
+        
+        res.json({ success: true });
+        
+    } catch (error) {
+        console.error('Balance update error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Get leaderboard (top 5)
+app.get('/api/leaderboard', (req, res) => {
+    db.all(`SELECT username, balance FROM leaderboard 
+            ORDER BY balance DESC LIMIT 5`, [], (err, rows) => {
+        if (err) {
+            return res.status(500).json({ error: 'Database error' });
+        }
+        res.json(rows);
+    });
+});
+
+// Get user rank
+app.get('/api/user-rank/:userId', (req, res) => {
+    const { userId } = req.params;
+    
+    db.get(`WITH ranked AS (
+                SELECT user_id, username, balance, 
+                       ROW_NUMBER() OVER (ORDER BY balance DESC) as rank
+                FROM leaderboard
+            )
+            SELECT rank FROM ranked WHERE user_id = ?`, [userId], (err, row) => {
+        if (err) {
+            return res.status(500).json({ error: 'Database error' });
+        }
+        res.json({ rank: row ? row.rank : null });
+    });
+});
+
+// Serve HTML for all routes (SPA support)
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
